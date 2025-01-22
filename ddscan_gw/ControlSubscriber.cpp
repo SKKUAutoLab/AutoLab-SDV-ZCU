@@ -10,14 +10,42 @@
 #include "ControlCommandPubSubTypes.h"
 #include <thread>
 #include <chrono>
+#include <signal.h>
 #include "s32g3_skku_can_setting.h"
 
 using namespace eprosima::fastdds::dds;
 using namespace eprosima::fastrtps::types;
 
+std::atomic<bool> running(true);
+
 int32_t steering_data, leftspeed_data, rightspeed_data;
 unsigned char can_msg_steering[4];
 unsigned char can_msg_speed[8];
+
+void sendShutdownMessages()
+{
+    // Speed message (0x123) - 모든 값을 0으로
+    memset(can_msg_speed, 0, 8);
+    send_can_msg(0x123, can_msg_speed, 8);
+
+    // Steering message (0x111) - [0,0,0,7]
+    can_msg_steering[0] = 0;
+    can_msg_steering[1] = 0;
+    can_msg_steering[2] = 0;
+    can_msg_steering[3] = 7;
+    send_can_msg(0x111, can_msg_steering, 4);
+    
+    std::cout << "Shutdown messages sent" << std::endl;
+}
+
+void signalHandler(int signum)
+{
+    if (signum == SIGTERM || signum == SIGINT)
+    {
+        running = false;
+    }
+}
+
 
 class ControlListener : public DataReaderListener {
 public:
@@ -32,6 +60,7 @@ public:
         } else {
             matched_--;
             std::cout << "Publisher unmatched! Total matches: " << matched_ << std::endl;
+            sendShutdownMessages();
         }
     }
 
@@ -82,6 +111,10 @@ private:
 int main(int argc, char** argv) {
     // CAN 초기화
     can_setting();
+
+    // Signal Handler 등록
+    signal(SIGTERM, signalHandler);
+    signal(SIGINT, signalHandler);
 
     // Create participant with default QoS
     DomainParticipantQos participant_qos = PARTICIPANT_QOS_DEFAULT;
@@ -138,27 +171,14 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "FastDDS Control Subscriber started on domain 0." << std::endl;
-    std::cout << "Press Enter to exit..." << std::endl;
-
-    // Block until Enter is pressed
-    std::cin.get();
-
-    // 종료 전 CAN 메시지 전송
-    // Speed message (0x123) - 모든 값을 0으로
-    memset(can_msg_speed, 0, 8);
-    send_can_msg(0x123, can_msg_speed, 8);
-
-    // Steering message (0x111) - [ 0, 0, 0, 7]
-    can_msg_steering[0] = 0;
-    can_msg_steering[1] = 0;
-    can_msg_steering[2] = 0;
-    can_msg_steering[3] = 7;
-    send_can_msg(0x111, can_msg_steering, 4);
 
     // Block the current thread until SIGINT
-    //while (1) {
-    //    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    //}
+    while (running) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    // 종료 시 초기화 메시지 전송
+    sendShutdownMessages();
 
     // Clean up
     if (reader != nullptr)

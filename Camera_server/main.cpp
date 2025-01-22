@@ -17,9 +17,21 @@
 #include <queue>
 #include <condition_variable>
 #include <cstdint>
+#include <signal.h>
+#include <atomic>
 
 using namespace eprosima::fastdds::dds;
 using namespace eprosima::fastrtps::types;
+
+std::atomic<bool> running(true);
+
+void signalHandler(int signum)
+{
+    if (signum == SIGTERM || signum == SIGINT) {
+        running = false;
+    }
+}
+
 
 class ImageListener : public DataWriterListener {
 public:
@@ -107,36 +119,32 @@ private:
         }
     }
 
-    void receiveLoop() {
+    void receiveLoop()
+    {
         std::vector<uint8_t> buffer(65507);
         uint32_t data_size;
 
-        while (running_) {
+        while (running_) {  // 클래스 내부 running_ 대신 전역 running 변수 사용
             // 데이터 크기 수신
             ssize_t size_received = recv(sock, &data_size, sizeof(data_size), 0);
-            if (size_received != sizeof(data_size)) continue;
-            
+            if (size_received != sizeof(data_size) || !running) break;  // running 체크 추가
+        
             data_size = ntohl(data_size);
-            
-            // JPEG 데이터 수신을 위한 벡터 준비
+        
             std::vector<uint8_t> jpeg_data;
             jpeg_data.resize(data_size);
 
-            // JPEG 데이터 수신
             ssize_t received = recv(sock, jpeg_data.data(), data_size, MSG_WAITALL);
 
-            if (received == static_cast<ssize_t>(data_size)) {
-                // FastDDS로 데이터 발행
-                std::vector<uint8_t>& data_ref = jpeg_data;
-                image_data_.data(data_ref);
-                image_data_.width(640);
-                image_data_.height(480);
-                image_data_.encoding("jpeg");
-                
-                writer_->write(&image_data_);
-                
-                // std::cout << "Published image data: " << data_size << " bytes" << std::endl;
-            }
+            if (received == static_cast<ssize_t>(data_size) && running) {  // running 체크 추가
+              std::vector<uint8_t>& data_ref = jpeg_data;
+               image_data_.data(data_ref);
+              image_data_.width(640);
+              image_data_.height(480);
+              image_data_.encoding("jpeg");
+            
+              writer_->write(&image_data_);
+         }
         }
     }
 
@@ -179,15 +187,22 @@ public:
 };
 
 int main(int argc, char** argv) {
+
+    // Signal Handler 등록
+    signal(SIGTERM, signalHandler);
+    signal(SIGINT, signalHandler);
+
     try {
         CameraServer server(8485);
         server.start();
 
-        // 메인 스레드는 여기서 대기
-        std::cout << "Press Enter to exit..." << std::endl;
-        std::cin.get();
+        // running 플래그를 체크하는 루프로 변경
+        while (running) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
 
         server.stop();
+        std::cout << "Program terminated safely." << std::endl;
     }
     catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
